@@ -27,6 +27,8 @@ on:
           - zn_m2_immwrt
           - zn_m2_libwrt
           - x64_immwrt
+          - MEDIATEK-WIFI-NO
+          - MEDIATEK-WIFI-YES
 
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -69,9 +71,10 @@ jobs:
           path: |
             ./action_build/.ccache
             ./action_build/staging_dir
-          key: ${{ matrix.os }}-${{ hashFiles('**/repo_flag') }}-${{ env.BUILD_DATE }}
+          key: ${{ matrix.os }}-${{ inputs.model }}-${{ hashFiles('**/repo_flag') }}-${{ env.BUILD_DATE }}
           restore-keys: |
-            ${{ matrix.os }}-${{ hashFiles('**/repo_flag') }}-
+            ${{ matrix.os }}-${{ inputs.model }}-${{ hashFiles('**/repo_flag') }}-
+            ${{ matrix.os }}-${{ inputs.model }}-
 
       - name: Refresh the cache
         run: |
@@ -111,6 +114,65 @@ jobs:
       - name: Build Firmware
         run: ./build.sh ${{ inputs.model }}
 
+      - name: Filter and Package Firmware
+        run: |
+          echo "========过滤固件文件========"
+          mkdir -p ./firmware_filtered
+          
+          if [ -d "./firmware" ]; then
+            cd ./firmware
+            
+            echo "========原始固件列表========"
+            ls -lh
+            
+            echo "========开始过滤========"
+            # 只保留 .bin 和 .itb 后缀的刷机包
+            # 排除: gpt、rootfs、kernel等中间文件
+            
+            # 保留所有.bin文件（squashfs、factory、sysupgrade等）
+            find . -type f -name "*.bin" -exec cp {} ../firmware_filtered/ \;
+            
+            # 保留所有.itb文件
+            find . -type f -name "*.itb" -exec cp {} ../firmware_filtered/ \;
+            
+            # 保留manifest文件（用于获取内核版本和插件列表）
+            find . -type f -name "*.manifest" -exec cp {} ../firmware_filtered/ \;
+            
+            # 如果是n1设备，保留tar.gz文件
+            if [[ "${{ inputs.model }}" == "n1_immwrt" ]]; then
+              find . -type f -name "*.tar.gz" -exec cp {} ../firmware_filtered/ \;
+            fi
+            
+            cd ..
+            
+            echo "========过滤后固件列表========"
+            ls -lh ./firmware_filtered/
+            
+            # 计算固件总大小
+            FIRMWARE_SIZE=$(du -sm ./firmware_filtered 2>/dev/null | cut -f1)
+            FIRMWARE_COUNT=$(find ./firmware_filtered -type f \( -name "*.bin" -o -name "*.itb" \) 2>/dev/null | wc -l)
+            
+            echo "========固件统计========"
+            echo "固件数量: ${FIRMWARE_COUNT}"
+            echo "固件总大小: ${FIRMWARE_SIZE}MB"
+            
+            # 如果固件超过1GB，发出警告
+            if [ $FIRMWARE_SIZE -gt 1024 ]; then
+              echo "⚠️ 警告: 固件总大小超过1GB (${FIRMWARE_SIZE}MB)"
+              echo "建议减少config中启用的设备数量或插件"
+            fi
+            
+            # 替换firmware目录
+            rm -rf ./firmware
+            mv ./firmware_filtered ./firmware
+            
+            echo "========固件过滤完成========"
+            echo "保留文件: *.bin, *.itb, *.manifest"
+          else
+            echo "❌ 错误: firmware目录不存在"
+            exit 1
+          fi
+
       - name: Get Kernel Verion
         run: |
           # 获取内核版本
@@ -118,14 +180,24 @@ jobs:
 
       - name: Delete Old Cache
         run: |
-          # 获取缓存列表并删除
-          gh cache list --key ${{ matrix.os }}-${{ hashFiles('**/repo_flag') }}- --json key --jq '.[] | .key' | while read -r key; do
-            gh cache delete "$key"
+          echo "========清理过期缓存========"
+          # 只删除相同model的旧缓存，保留其他model的缓存
+          gh cache list --key ${{ matrix.os }}-${{ inputs.model }}- --json key --jq '.[] | .key' | while read -r key; do
+            # 跳过当前构建的缓存key
+            if [[ "$key" != "${{ matrix.os }}-${{ inputs.model }}-${{ hashFiles('**/repo_flag') }}-${{ env.BUILD_DATE }}" ]]; then
+              gh cache delete "$key" || true
+            fi
           done
+          
           # 输出缓存状态
-          echo "========cache status========"
-          echo "ccache: $(du -sh ./action_build/.ccache | cut -f 1)"
-          echo "staging: $(du -sh ./action_build/staging_dir | cut -f 1)"
+          echo "========当前缓存状态========"
+          if [ -d "./action_build/.ccache" ]; then
+            echo "ccache: $(du -sh ./action_build/.ccache 2>/dev/null | cut -f 1 || echo '0')"
+          fi
+          if [ -d "./action_build/staging_dir" ]; then
+            echo "staging: $(du -sh ./action_build/staging_dir 2>/dev/null | cut -f 1 || echo '0')"
+          fi
+          echo "============================="
 
       - name: Machine Information (Post-build)
         run: |
@@ -178,3 +250,22 @@ jobs:
           tag_name: ${{ env.BUILD_DATE }}_${{ inputs.model }}
           files: ${{ inputs.model == 'n1_immwrt' && env.PACKAGED_OUTPUTPATH || './firmware' }}/*.*
           body_path: ./release_body.txt
+
+      - name: Clean Build Files
+        if: always()
+        run: |
+          echo "========清理构建文件========"
+          if [ -d "./action_build" ]; then
+            cd ./action_build
+            # 清理下载的源码包（可重新下载）
+            rm -rf dl/ 2>/dev/null || true
+            # 清理编译输出（除了固件）
+            find ./bin -type f ! -name "*.bin" ! -name "*.img" ! -name "*.gz" -delete 2>/dev/null || true
+            # 清理临时文件
+            rm -rf tmp/ 2>/dev/null || true
+            rm -rf logs/ 2>/dev/null || true
+          fi
+          
+          echo "========磁盘使用情况========"
+          df -h
+          echo "============================"

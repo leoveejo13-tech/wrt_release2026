@@ -1,0 +1,32 @@
+# 自动清理工作流
+# 功能：定期清理旧的Releases和Workflows，节省GitHub存储空间
+
+name: Auto-Clean
+
+on:
+  # 自动清理：每天UTC 21:00（北京时间早上5点）
+  schedule:
+    - cron: 0 21 * * *
+  # 手动清理
+  workflow_dispatch:
+
+permissions: write-all
+
+jobs:
+  auto_clean:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old Releases and Workflows
+        uses: ophub/delete-releases-workflows@main
+        with:
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
+          # 删除旧的releases
+          delete_releases: true
+          # 保留最新N个release（0表示全部删除）
+          releases_keep_latest: 3
+          # 删除对应的tags
+          delete_tags: true
+          # 删除旧的workflow运行记录
+          delete_workflows: true
+          # 保留最近N天的workflow（0表示全部删除）
+          workflows_keep_day: 3
