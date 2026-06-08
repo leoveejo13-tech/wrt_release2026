@@ -1,5 +1,63 @@
 #!/usr/bin/env bash
 
+_docker_stack_is_dockerman_enabled() {
+    local build_dir="$1"
+    
+    # 规范化路径
+    if [[ "$build_dir" != /* ]]; then
+        build_dir="$(pwd)/$build_dir"
+    fi
+    
+    # 优先检查原始设备配置文件（wrt_core/deconfig）
+    if [ -n "$DEVICE_NAME" ]; then
+        local source_config="$SCRIPT_DIR/deconfig/${DEVICE_NAME}.config"
+        if [ -f "$source_config" ]; then
+            # 如果明确禁用，直接返回 false
+            if grep -q "^CONFIG_PACKAGE_luci-app-dockerman=n" "$source_config"; then
+                echo "跳过 docker nftables 兼容性配置：在 ${DEVICE_NAME}.config 中已禁用 luci-app-dockerman"
+                return 1
+            fi
+            # 如果明确启用，返回 true
+            if grep -q "^CONFIG_PACKAGE_luci-app-dockerman=y" "$source_config"; then
+                echo "在 ${DEVICE_NAME}.config 中检测到 dockerman 已启用"
+                return 0
+            fi
+        fi
+    fi
+    
+    # 其次检查构建目录的 .config 文件
+    local config_file="$build_dir/.config"
+    if [ -f "$config_file" ]; then
+        # 如果明确禁用，直接返回 false
+        if grep -q "^CONFIG_PACKAGE_luci-app-dockerman=n" "$config_file"; then
+            echo "跳过 docker nftables 兼容性配置：配置中已禁用 luci-app-dockerman"
+            return 1
+        fi
+        # 如果明确启用，返回 true
+        if grep -q "^CONFIG_PACKAGE_luci-app-dockerman=y" "$config_file"; then
+            echo "在 .config 中检测到 dockerman 已启用"
+            return 0
+        fi
+    fi
+    
+    # 如果配置文件中没有明确设置，再检查目录是否存在
+    local dockerman_paths=(
+        "$build_dir/feeds/luci/applications/luci-app-dockerman"
+        "$build_dir/package/feeds/luci/luci-app-dockerman"
+        "$build_dir/feeds/packages/utils/dockerd"
+        "$build_dir/package/feeds/packages/dockerd"
+    )
+    
+    for path in "${dockerman_paths[@]}"; do
+        if [ -d "$path" ]; then
+            echo "检测到 dockerman 相关包: $path"
+            return 0
+        fi
+    done
+    
+    return 1
+}
+
 _docker_stack_resolve_component_makefile() {
     local build_dir="$1"
     local component="$2"
@@ -336,6 +394,12 @@ docker_stack_sync_dockerman_nftables_compat() {
         echo "错误：docker_stack_sync_dockerman_nftables_compat 缺少 build_dir 参数" >&2
         return 1
     }
+
+    # 检查配置文件中是否启用了 dockerman
+    if ! _docker_stack_is_dockerman_enabled "$build_dir"; then
+        echo "跳过 dockerman nftables 兼容性配置：配置中未启用 luci-app-dockerman"
+        return 0
+    fi
 
     build_dir=$(_docker_stack_normalize_build_dir "$build_dir")
     dockerman_init=$(_docker_stack_resolve_dockerman_init "$build_dir" || true)
@@ -851,6 +915,12 @@ docker_stack_sync_nftables_compat() {
         echo "错误：docker_stack_sync_nftables_compat 缺少 build_dir 参数" >&2
         return 1
     }
+
+    # 检查配置文件中是否启用了 dockerman
+    if ! _docker_stack_is_dockerman_enabled "$build_dir"; then
+        echo "跳过 docker nftables 兼容性配置：配置中未启用 luci-app-dockerman"
+        return 0
+    fi
 
     if [ "$dry_run" != "0" ] && [ "$dry_run" != "1" ]; then
         echo "错误：docker_stack_sync_nftables_compat 仅支持 dry_run 为 0 或 1，当前值: $dry_run" >&2

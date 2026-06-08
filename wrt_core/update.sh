@@ -14,6 +14,7 @@ REPO_URL=$1
 REPO_BRANCH=$2
 BUILD_DIR=$3
 COMMIT_HASH=$4
+DEVICE_NAME=$5
 
 # Convert BUILD_DIR to absolute path
 if [[ "$BUILD_DIR" != /* ]]; then
