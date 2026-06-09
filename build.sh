@@ -231,9 +231,32 @@ make -j$(($(nproc) + 1)) || make -j1 V=s
 FIRMWARE_DIR="$BASE_PATH/../firmware"
 \rm -rf "$FIRMWARE_DIR"
 mkdir -p "$FIRMWARE_DIR"
-find "$TARGET_DIR" -type f \( -name "*.bin" -o -name "*.manifest" -o -name "*efi.img.gz" -o -name "*.itb" -o -name "*.fip" -o -name "*.ubi" -o -name "*rootfs.tar.gz" \) -exec cp -f {} "$FIRMWARE_DIR/" \;
+
+# 只复制sysupgrade固件（最常用）和manifest
+find "$TARGET_DIR" -type f \( -name "*sysupgrade*.bin" -o -name "*sysupgrade*.itb" -o -name "*.manifest" \) -exec cp -f {} "$FIRMWARE_DIR/" \;
 \rm -f "$BASE_PATH/../firmware/Packages.manifest" 2>/dev/null
 
+echo "========固件已过滤，只保留sysupgrade固件========"
+ls -lh "$FIRMWARE_DIR/" | head -20
+
+# 立即清理build目录释放空间
 if [[ -d action_build ]]; then
-    make clean
+    echo "========清理build目录释放空间========"
+    cd "$BASE_PATH/../$BUILD_DIR"
+    
+    # 删除下载的源码包
+    \rm -rf dl/ 2>/dev/null || true
+    
+    # 删除编译输出（bin目录）
+    \rm -rf bin/ 2>/dev/null || true
+    
+    # 删除编译临时文件
+    \rm -rf tmp/ 2>/dev/null || true
+    \rm -rf logs/ 2>/dev/null || true
+    
+    # 删除build_dir（保留staging_dir用于缓存）
+    \rm -rf build_dir/ 2>/dev/null || true
+    
+    echo "清理完成，当前磁盘空间："
+    df -h | head -n 2
 fi
