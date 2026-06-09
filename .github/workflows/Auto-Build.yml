@@ -1,0 +1,208 @@
+# 自动定期编译工作流
+# 功能：定期自动编译指定设备的固件
+
+name: Auto-Build
+
+on:
+  # 自动编译：每天 UTC 20:00（北京时间早上4点）
+  schedule:
+    - cron: 0 20 * * *
+  # 也可以手动触发
+  workflow_dispatch:
+
+permissions: write-all
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      max-parallel: 1  # 一次编译一个，避免空间不足
+      matrix:
+        model:
+          - MEDIATEK-WIFI-NO
+          - MEDIATEK-WIFI-YES
+          - jdcloud_ax6000_immwrt
+    
+    runs-on: ubuntu-24.04
+    
+    steps:
+      - name: Build System Setup
+        run: |
+          # 清理磁盘空间
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc 2>/dev/null || true
+          sudo docker image prune -a -f 2>/dev/null || true
+          
+          # 安装编译环境
+          sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+          sudo -E apt -yqq install dos2unix libfuse-dev
+          sudo -E apt -yqq autoremove --purge
+          sudo -E apt -yqq autoclean
+          sudo -E apt -yqq clean
+          sudo -E systemctl daemon-reload
+          
+          echo "========初始磁盘空间========"
+          df -h
+          echo "============================"
+
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Set Build Date and Timezone
+        run: |
+          sudo -E timedatectl set-timezone "Asia/Shanghai"
+          export BUILD_DATE=$(TZ=UTC-8 date +"%y.%m.%d_%H.%M.%S")
+          echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
+          export BUILD_SRC=$(awk -F"=" '/REPO_URL/ {print $NF}' "./wrt_core/compilecfg/${{ matrix.model }}.ini")
+          echo "BUILD_SRC=$BUILD_SRC" >> $GITHUB_ENV
+
+      - name: Pre Clone
+        run: ./wrt_core/pre_clone_action.sh ${{ matrix.model }}
+
+      - name: Cache Dependencies
+        uses: actions/cache@v5.0.2
+        with:
+          path: |
+            ./action_build/.ccache
+            ./action_build/staging_dir
+          key: ubuntu-24.04-${{ matrix.model }}-${{ hashFiles('**/repo_flag') }}-${{ env.BUILD_DATE }}
+          restore-keys: |
+            ubuntu-24.04-${{ matrix.model }}-${{ hashFiles('**/repo_flag') }}-
+            ubuntu-24.04-${{ matrix.model }}-
+
+      - name: Refresh the cache
+        run: |
+          if [ -d "./action_build/staging_dir" ]; then
+            find "./action_build/staging_dir" -type d -name "stamp" -not -path "*target*" | while read -r dir; do
+                find "$dir" -type f -exec touch {} +
+            done
+          fi
+
+      - name: Machine Information (Pre-build)
+        run: |
+          echo "=============== Pre-build Snapshot ==============="
+          echo "设备: ${{ matrix.model }}"
+          echo "Time: $(date '+%F %T %Z')"
+          echo "Runner: ${RUNNER_NAME} (${RUNNER_OS}/${RUNNER_ARCH})"
+          echo "=================================================="
+          echo "[Disk]"
+          df -hT
+          echo "=================================================="
+
+      - name: Build Firmware
+        run: ./build.sh ${{ matrix.model }}
+
+      - name: Get Kernel Version
+        run: |
+          echo "KVER=$(grep -oP "^kernel.*" ./firmware/*.manifest | grep -oP "[4-6]\.[0-9]{1,3}\.[0-9]{1,3}")" >> $GITHUB_ENV
+
+      - name: Filter and Package Firmware
+        run: |
+          echo "========过滤固件文件========"
+          mkdir -p ./firmware_filtered
+          
+          if [ -d "./firmware" ]; then
+            cd ./firmware
+            
+            echo "========原始固件列表========"
+            ls -lh
+            
+            echo "========开始过滤========"
+            # 只保留关键固件：sysupgrade和factory
+            # 排除: initramfs、preloader、bl2、bl31、fip等中间文件
+            
+            find . -type f \( -name "*sysupgrade*.bin" -o -name "*sysupgrade*.itb" \) -exec cp {} ../firmware_filtered/ \;
+            find . -type f \( -name "*factory*.bin" -o -name "*factory*.itb" \) -exec cp {} ../firmware_filtered/ \;
+            find . -type f -name "*.manifest" -exec cp {} ../firmware_filtered/ \;
+            
+            cd ..
+            
+            echo "========过滤后固件列表========"
+            ls -lh ./firmware_filtered/
+            
+            FIRMWARE_SIZE=$(du -sm ./firmware_filtered 2>/dev/null | cut -f1)
+            FIRMWARE_COUNT=$(find ./firmware_filtered -type f \( -name "*.bin" -o -name "*.itb" \) 2>/dev/null | wc -l)
+            
+            echo "========固件统计========"
+            echo "固件数量: ${FIRMWARE_COUNT}"
+            echo "固件总大小: ${FIRMWARE_SIZE}MB"
+            
+            rm -rf ./firmware
+            mv ./firmware_filtered ./firmware
+            
+            echo "========固件过滤完成========"
+          else
+            echo "❌ 错误: firmware目录不存在"
+            exit 1
+          fi
+
+      - name: Delete Old Cache
+        run: |
+          echo "========清理过期缓存========"
+          gh cache list --key ubuntu-24.04-${{ matrix.model }}- --json key --jq '.[] | .key' | while read -r key; do
+            if [[ "$key" != "ubuntu-24.04-${{ matrix.model }}-${{ hashFiles('**/repo_flag') }}-${{ env.BUILD_DATE }}" ]]; then
+              gh cache delete "$key" || true
+            fi
+          done
+          
+          echo "========当前缓存状态========"
+          if [ -d "./action_build/.ccache" ]; then
+            echo "ccache: $(du -sh ./action_build/.ccache 2>/dev/null | cut -f 1 || echo '0')"
+          fi
+          if [ -d "./action_build/staging_dir" ]; then
+            echo "staging: $(du -sh ./action_build/staging_dir 2>/dev/null | cut -f 1 || echo '0')"
+          fi
+          echo "============================="
+
+      - name: Machine Information (Post-build)
+        run: |
+          echo "=============== Post-build Snapshot ==============="
+          echo "设备: ${{ matrix.model }}"
+          echo "Time: $(date '+%F %T %Z')"
+          echo "===================================================="
+          echo "[Disk]"
+          df -hT
+          echo "===================================================="
+          echo "[Build Outputs]"
+          du -sh ./action_build/.ccache 2>/dev/null || true
+          du -sh ./action_build/staging_dir 2>/dev/null || true
+          du -sh ./firmware 2>/dev/null || true
+          echo "Firmware file count: $(ls -1 ./firmware 2>/dev/null | wc -l)"
+          echo "===================================================="
+
+      - name: Prepare Release Body
+        run: |
+          echo "自动定期编译" > release_body.txt
+          echo "设备: ${{ matrix.model }}" >> release_body.txt
+          echo "源码：${{ env.BUILD_SRC }}" >> release_body.txt
+          echo "Kernel: ${{ env.KVER }}" >> release_body.txt
+          echo "WIFI密码: 12345678" >> release_body.txt
+          echo "LAN地址: 192.168.1.1" >> release_body.txt
+          echo "" >> release_body.txt
+          echo "插件列表：" >> release_body.txt
+          echo "$(grep -oP "luci-app(-[a-zA-Z0-9]{1,}){1,}" ./firmware/*.manifest | awk -F":" '{print $NF}')" >> release_body.txt
+
+      - name: Release Firmware
+        uses: softprops/action-gh-release@v2.5.0
+        with:
+          tag_name: ${{ env.BUILD_DATE }}_${{ matrix.model }}
+          files: ./firmware/*.*
+          body_path: ./release_body.txt
+
+      - name: Clean Build Files
+        if: always()
+        run: |
+          echo "========清理构建文件========"
+          if [ -d "./action_build" ]; then
+            cd ./action_build
+            rm -rf dl/ 2>/dev/null || true
+            find ./bin -type f ! -name "*.bin" ! -name "*.img" ! -name "*.gz" -delete 2>/dev/null || true
+            rm -rf tmp/ 2>/dev/null || true
+            rm -rf logs/ 2>/dev/null || true
+          fi
+          
+          echo "========磁盘使用情况========"
+          df -h
+          echo "============================"
