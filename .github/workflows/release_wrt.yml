@@ -43,13 +43,21 @@ jobs:
     steps:
       - name: Build System Setup
         run: |
+          # 清理磁盘空间
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc 2>/dev/null || true
+          sudo docker image prune -a -f 2>/dev/null || true
+          
+          # 安装编译环境
           sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
-          sudo -E apt -yqq install dos2unix
-          sudo -E apt -yqq install libfuse-dev
+          sudo -E apt -yqq install dos2unix libfuse-dev
           sudo -E apt -yqq autoremove --purge
           sudo -E apt -yqq autoclean
           sudo -E apt -yqq clean
           sudo -E systemctl daemon-reload
+          
+          echo "========初始磁盘空间========"
+          df -h
+          echo "============================"
 
       - name: Checkout
         uses: actions/checkout@v6.0.2
@@ -126,14 +134,14 @@ jobs:
             ls -lh
             
             echo "========开始过滤========"
-            # 只保留 .bin 和 .itb 后缀的刷机包
-            # 排除: gpt、rootfs、kernel等中间文件
+            # 只保留关键固件：sysupgrade和factory
+            # 排除: initramfs、preloader、bl2、bl31、fip等中间文件
             
-            # 保留所有.bin文件（squashfs、factory、sysupgrade等）
-            find . -type f -name "*.bin" -exec cp {} ../firmware_filtered/ \;
+            # 保留sysupgrade固件
+            find . -type f \( -name "*sysupgrade*.bin" -o -name "*sysupgrade*.itb" \) -exec cp {} ../firmware_filtered/ \;
             
-            # 保留所有.itb文件
-            find . -type f -name "*.itb" -exec cp {} ../firmware_filtered/ \;
+            # 保留factory固件
+            find . -type f \( -name "*factory*.bin" -o -name "*factory*.itb" \) -exec cp {} ../firmware_filtered/ \;
             
             # 保留manifest文件（用于获取内核版本和插件列表）
             find . -type f -name "*.manifest" -exec cp {} ../firmware_filtered/ \;
@@ -167,7 +175,8 @@ jobs:
             mv ./firmware_filtered ./firmware
             
             echo "========固件过滤完成========"
-            echo "保留文件: *.bin, *.itb, *.manifest"
+            echo "保留文件: *sysupgrade*, *factory*, *.manifest"
+            echo "排除文件: initramfs, preloader, bl2, bl31, fip等中间文件"
           else
             echo "❌ 错误: firmware目录不存在"
             exit 1
