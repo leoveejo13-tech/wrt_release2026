@@ -1,12 +1,12 @@
 # 自动定期编译工作流
-# 功能：定期自动编译指定设备的固件
+# 功能：监听上游源码仓库变动，自动触发编译
 
 name: Auto-Build
 
 on:
-  # 自动编译：每天 UTC 20:00（北京时间早上4点）
+  # 监听上游仓库更新：每6小时检查一次
   schedule:
-    - cron: 0 20 * * *
+    - cron: 0 */6 * * *
   # 也可以手动触发
   workflow_dispatch:
 
@@ -16,7 +16,63 @@ env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
+  check-updates:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Check Upstream Updates
+        id: check
+        run: |
+          echo "========检查上游仓库更新========"
+          
+          # 检查 VIKINGYFY/immortalwrt (owrt分支) 的最新提交
+          VIKINGYFY_COMMIT=$(git ls-remote https://github.com/VIKINGYFY/immortalwrt.git refs/heads/owrt | cut -f1)
+          echo "VIKINGYFY/immortalwrt@owrt: $VIKINGYFY_COMMIT"
+          
+          # 检查 chasey-dev/immortalwrt-mt798x-rebase (25.12分支) 的最新提交
+          CHASEY_COMMIT=$(git ls-remote https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git refs/heads/25.12 | cut -f1)
+          echo "chasey-dev/immortalwrt-mt798x-rebase@25.12: $CHASEY_COMMIT"
+          
+          # 检查是否有记录文件
+          LAST_VIKINGYFY=""
+          LAST_CHASEY=""
+          if [ -f ".github/last_build_commits.txt" ]; then
+            LAST_VIKINGYFY=$(grep "VIKINGYFY:" .github/last_build_commits.txt | cut -d: -f2)
+            LAST_CHASEY=$(grep "CHASEY:" .github/last_build_commits.txt | cut -d: -f2)
+          fi
+          
+          echo "上次编译 VIKINGYFY: $LAST_VIKINGYFY"
+          echo "上次编译 CHASEY: $LAST_CHASEY"
+          
+          # 判断是否需要编译
+          if [ "$VIKINGYFY_COMMIT" != "$LAST_VIKINGYFY" ] || [ "$CHASEY_COMMIT" != "$LAST_CHASEY" ]; then
+            echo "✅ 检测到上游更新，触发编译"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            
+            # 记录新的提交
+            mkdir -p .github
+            echo "VIKINGYFY:$VIKINGYFY_COMMIT" > .github/last_build_commits.txt
+            echo "CHASEY:$CHASEY_COMMIT" >> .github/last_build_commits.txt
+            
+            # 提交记录文件
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add .github/last_build_commits.txt
+            git commit -m "chore: 更新上游提交记录 [skip ci]" || true
+            git push || true
+          else
+            echo "⏭️ 上游无更新，跳过编译"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          fi
+          echo "================================"
+
   build:
+    needs: check-updates
+    if: needs.check-updates.outputs.should_build == 'true'
     strategy:
       fail-fast: false
       max-parallel: 1  # 一次编译一个，避免空间不足
@@ -174,10 +230,15 @@ jobs:
 
       - name: Prepare Release Body
         run: |
-          echo "自动定期编译" > release_body.txt
+          echo "上游更新自动编译" > release_body.txt
           echo "设备: ${{ matrix.model }}" >> release_body.txt
           echo "源码：${{ env.BUILD_SRC }}" >> release_body.txt
           echo "Kernel: ${{ env.KVER }}" >> release_body.txt
+          echo "" >> release_body.txt
+          echo "上游仓库：" >> release_body.txt
+          echo "- VIKINGYFY/immortalwrt@owrt" >> release_body.txt
+          echo "- chasey-dev/immortalwrt-mt798x-rebase@25.12" >> release_body.txt
+          echo "" >> release_body.txt
           echo "WIFI密码: 12345678" >> release_body.txt
           echo "LAN地址: 192.168.1.1" >> release_body.txt
           echo "" >> release_body.txt
