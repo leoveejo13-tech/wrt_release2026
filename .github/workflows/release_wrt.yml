@@ -39,6 +39,11 @@ jobs:
       matrix:
         os: [ubuntu-24.04]
     runs-on: ${{ matrix.os }}
+    
+    outputs:
+      build_date: ${{ steps.set-date.outputs.build_date }}
+      build_src: ${{ steps.set-date.outputs.build_src }}
+      kernel_ver: ${{ steps.get-kver.outputs.kernel_ver }}
 
     steps:
       - name: Build System Setup
@@ -63,12 +68,16 @@ jobs:
         uses: actions/checkout@v6.0.2
 
       - name: Set Build Date and Timezone
+        id: set-date
         run: |
           sudo -E timedatectl set-timezone "Asia/Shanghai"
-          export BUILD_DATE=$(TZ=UTC-8 date +"%y.%m.%d_%H.%M.%S")
+          BUILD_DATE=$(TZ=UTC-8 date +"%y.%m.%d_%H.%M.%S")
           echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
-          export BUILD_SRC=$(awk -F"=" '/REPO_URL/ {print $NF}' "./wrt_core/compilecfg/${{ inputs.model }}.ini")
+          echo "build_date=$BUILD_DATE" >> $GITHUB_OUTPUT
+          
+          BUILD_SRC=$(awk -F"=" '/REPO_URL/ {print $NF}' "./wrt_core/compilecfg/${{ inputs.model }}.ini")
           echo "BUILD_SRC=$BUILD_SRC" >> $GITHUB_ENV
+          echo "build_src=$BUILD_SRC" >> $GITHUB_OUTPUT
 
       - name: Pre Clone
         run: ./wrt_core/pre_clone_action.sh ${{ inputs.model }}
@@ -95,28 +104,11 @@ jobs:
       - name: Machine Information (Pre-build)
         run: |
           echo "=============== Pre-build Snapshot ==============="
+          echo "设备: ${{ inputs.model }}"
           echo "Time: $(date '+%F %T %Z')"
-          echo "Runner: ${RUNNER_NAME} (${RUNNER_OS}/${RUNNER_ARCH})"
-          echo "Kernel: $(uname -r)"
-          echo "Uptime: $(uptime -p)"
-          echo "=================================================="
-          echo "[CPU]"
-          lscpu | grep -E "Model name|Architecture|CPU\\(s\\)|Thread\\(s\\) per core|Core\\(s\\) per socket|CPU max MHz"
-          echo "=================================================="
-          echo "[Memory]"
-          free -h
           echo "=================================================="
           echo "[Disk]"
           df -hT
-          echo "--------------------------------------------------"
-          df -hi
-          echo "=================================================="
-          echo "[Workspace]"
-          echo "GITHUB_WORKSPACE=${GITHUB_WORKSPACE}"
-          du -sh "${GITHUB_WORKSPACE}" 2>/dev/null || true
-          du -sh ./action_build/.ccache 2>/dev/null || true
-          du -sh ./action_build/staging_dir 2>/dev/null || true
-          du -sh ./firmware 2>/dev/null || true
           echo "=================================================="
 
       - name: Build Firmware
@@ -133,9 +125,13 @@ jobs:
           echo "======================="
 
       - name: Get Kernel Verion
+        id: get-kver
         run: |
           # 获取内核版本
-          echo "KVER=$(grep -oP "^kernel.*" ./firmware/*.manifest | grep -oP "[4-6]\.[0-9]{1,3}\.[0-9]{1,3}")" >> $GITHUB_ENV
+          KVER=$(grep -oP "^kernel.*" ./firmware/*.manifest | grep -oP "[4-6]\.[0-9]{1,3}\.[0-9]{1,3}" | head -1)
+          echo "KVER=$KVER" >> $GITHUB_ENV
+          echo "kernel_ver=$KVER" >> $GITHUB_OUTPUT
+          echo "Kernel version: $KVER"
 
       - name: Delete Old Cache
         run: |
@@ -161,54 +157,20 @@ jobs:
       - name: Machine Information (Post-build)
         run: |
           echo "=============== Post-build Snapshot ==============="
-          echo "Time: $(date '+%F %T %Z')"
-          echo "Runner: ${RUNNER_NAME} (${RUNNER_OS}/${RUNNER_ARCH})"
-          echo "Kernel: $(uname -r)"
-          echo "Uptime: $(uptime -p)"
-          echo "===================================================="
-          echo "[CPU]"
-          lscpu | grep -E "Model name|Architecture|CPU\\(s\\)|Thread\\(s\\) per core|Core\\(s\\) per socket|CPU max MHz"
-          echo "===================================================="
-          echo "[Memory]"
-          free -h
-          echo "===================================================="
+          echo "设备: ${{ inputs.model }}"
+          echo "=================================================="
           echo "[Disk]"
           df -hT
-          echo "----------------------------------------------------"
-          df -hi
-          echo "===================================================="
-          echo "[Build Outputs]"
-          du -sh ./action_build/.ccache 2>/dev/null || true
-          du -sh ./action_build/staging_dir 2>/dev/null || true
-          du -sh ./firmware 2>/dev/null || true
-          echo "Firmware file count: $(ls -1 ./firmware 2>/dev/null | wc -l)"
           echo "===================================================="
 
-      - name: Package OpenWrt Firmware
-        if: ${{ inputs.model == 'n1_immwrt' }}
-        uses: unifreq/openwrt_packit@master
-        env:
-          OPENWRT_ARMVIRT: firmware/*.tar.gz
-          PACKAGE_SOC: s905d
-          KERNEL_VERSION_NAME: 6.6.y
-          WHOAMI: ZqinKing
-
-      - name: Prepare Release Body
-        run: |
-          echo "云编译发布" > release_body.txt
-          echo "源码：${{ env.BUILD_SRC }}" >> release_body.txt
-          echo "Kernel: ${{ env.KVER }}" >> release_body.txt
-          echo "WIFI密码: 12345678" >> release_body.txt
-          echo "LAN地址: 192.168.1.1" >> release_body.txt
-          echo "插件：" >> release_body.txt
-          echo "$(grep -oP "luci-app(-[a-zA-Z0-9]{1,}){1,}" ./firmware/*.manifest | awk -F":" '{print $NF}')"  >> release_body.txt
-
-      - name: Release Firmware
-        uses: softprops/action-gh-release@v2.5.0
+      - name: Upload Firmware Artifact
+        uses: actions/upload-artifact@v6
         with:
-          tag_name: ${{ env.BUILD_DATE }}_${{ inputs.model }}
-          files: ${{ inputs.model == 'n1_immwrt' && env.PACKAGED_OUTPUTPATH || './firmware' }}/*.*
-          body_path: ./release_body.txt
+          name: firmware_${{ inputs.model }}_${{ env.BUILD_DATE }}
+          path: ./firmware/*
+          retention-days: 1
+          compression-level: 9
+          if-no-files-found: error
 
       - name: Clean Build Files
         if: always()
@@ -228,3 +190,43 @@ jobs:
           echo "========磁盘使用情况========"
           df -h
           echo "============================"
+
+  upload:
+    needs: build
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Download Firmware Artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: firmware_${{ inputs.model }}_${{ needs.build.outputs.build_date }}
+          path: ./firmware
+
+      - name: Package OpenWrt Firmware
+        if: ${{ inputs.model == 'n1_immwrt' }}
+        uses: unifreq/openwrt_packit@master
+        env:
+          OPENWRT_ARMVIRT: firmware/*.tar.gz
+          PACKAGE_SOC: s905d
+          KERNEL_VERSION_NAME: 6.6.y
+          WHOAMI: ZqinKing
+
+      - name: Prepare Release Body
+        run: |
+          echo "云编译发布" > release_body.txt
+          echo "源码：${{ needs.build.outputs.build_src }}" >> release_body.txt
+          echo "Kernel: ${{ needs.build.outputs.kernel_ver }}" >> release_body.txt
+          echo "WIFI密码: 12345678" >> release_body.txt
+          echo "LAN地址: 192.168.1.1" >> release_body.txt
+          echo "插件：" >> release_body.txt
+          grep -oP "luci-app(-[a-zA-Z0-9]{1,}){1,}" ./firmware/*.manifest 2>/dev/null | awk -F":" '{print $NF}' >> release_body.txt || echo "N/A" >> release_body.txt
+
+      - name: Release Firmware
+        uses: softprops/action-gh-release@v2.5.0
+        with:
+          tag_name: ${{ needs.build.outputs.build_date }}_${{ inputs.model }}
+          files: ${{ inputs.model == 'n1_immwrt' && env.PACKAGED_OUTPUTPATH || './firmware' }}/*.*
+          body_path: ./release_body.txt

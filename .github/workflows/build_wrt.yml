@@ -43,6 +43,9 @@ jobs:
       matrix:
         os: [ubuntu-24.04]
     runs-on: ${{ matrix.os }}
+    
+    outputs:
+      build_date: ${{ steps.set-date.outputs.build_date }}
 
     steps:
       - name: Build System Setup
@@ -67,10 +70,12 @@ jobs:
         uses: actions/checkout@v6.0.2
 
       - name: Set Build Date and Timezone
+        id: set-date
         run: |
           sudo -E timedatectl set-timezone "Asia/Shanghai"
-          export BUILD_DATE=$(TZ=UTC-8 date +"%y.%m.%d_%H.%M.%S")
+          BUILD_DATE=$(TZ=UTC-8 date +"%y.%m.%d_%H.%M.%S")
           echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
+          echo "build_date=$BUILD_DATE" >> $GITHUB_OUTPUT
 
       - name: Clean Old Caches (Optional)
         if: inputs.clean_cache == true
@@ -107,28 +112,11 @@ jobs:
       - name: Machine Information (Pre-build)
         run: |
           echo "=============== Pre-build Snapshot ==============="
+          echo "设备: ${{ inputs.model }}"
           echo "Time: $(date '+%F %T %Z')"
-          echo "Runner: ${RUNNER_NAME} (${RUNNER_OS}/${RUNNER_ARCH})"
-          echo "Kernel: $(uname -r)"
-          echo "Uptime: $(uptime -p)"
-          echo "=================================================="
-          echo "[CPU]"
-          lscpu | grep -E "Model name|Architecture|CPU\\(s\\)|Thread\\(s\\) per core|Core\\(s\\) per socket|CPU max MHz"
-          echo "=================================================="
-          echo "[Memory]"
-          free -h
           echo "=================================================="
           echo "[Disk]"
           df -hT
-          echo "--------------------------------------------------"
-          df -hi
-          echo "=================================================="
-          echo "[Workspace]"
-          echo "GITHUB_WORKSPACE=${GITHUB_WORKSPACE}"
-          du -sh "${GITHUB_WORKSPACE}" 2>/dev/null || true
-          du -sh ./action_build/.ccache 2>/dev/null || true
-          du -sh ./action_build/staging_dir 2>/dev/null || true
-          du -sh ./firmware 2>/dev/null || true
           echo "=================================================="
 
       - name: Build Firmware
@@ -144,90 +132,56 @@ jobs:
           echo "固件总大小: ${FIRMWARE_SIZE}MB"
           echo "======================="
 
+      - name: Upload Firmware Artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: firmware_${{ inputs.model }}_${{ env.BUILD_DATE }}
+          path: ./firmware/*
+          retention-days: 1
+          compression-level: 9
+          if-no-files-found: error
+
       - name: Delete Old Cache
         run: |
           echo "========清理过期缓存========"
-          # 只删除相同model的旧缓存，保留其他model的缓存
           gh cache list --key ${{ matrix.os }}-${{ inputs.model }}- --json key --jq '.[] | .key' | while read -r key; do
-            # 跳过当前构建的缓存key
             if [[ "$key" != "${{ matrix.os }}-${{ inputs.model }}-${{ hashFiles('**/repo_flag') }}-${{ env.BUILD_DATE }}" ]]; then
               gh cache delete "$key" || true
             fi
           done
-          
-          # 输出缓存状态
-          echo "========当前缓存状态========"
-          if [ -d "./action_build/.ccache" ]; then
-            echo "ccache: $(du -sh ./action_build/.ccache 2>/dev/null | cut -f 1 || echo '0')"
-          fi
-          if [ -d "./action_build/staging_dir" ]; then
-            echo "staging: $(du -sh ./action_build/staging_dir 2>/dev/null | cut -f 1 || echo '0')"
-          fi
-          echo "============================="
 
       - name: Machine Information (Post-build)
         run: |
           echo "=============== Post-build Snapshot ==============="
-          echo "Time: $(date '+%F %T %Z')"
-          echo "Runner: ${RUNNER_NAME} (${RUNNER_OS}/${RUNNER_ARCH})"
-          echo "Kernel: $(uname -r)"
-          echo "Uptime: $(uptime -p)"
-          echo "===================================================="
-          echo "[CPU]"
-          lscpu | grep -E "Model name|Architecture|CPU\\(s\\)|Thread\\(s\\) per core|Core\\(s\\) per socket|CPU max MHz"
-          echo "===================================================="
-          echo "[Memory]"
-          free -h
-          echo "===================================================="
+          echo "设备: ${{ inputs.model }}"
+          echo "=================================================="
           echo "[Disk]"
           df -hT
-          echo "----------------------------------------------------"
-          df -hi
-          echo "===================================================="
-          echo "[Build Outputs]"
-          du -sh ./action_build/.ccache 2>/dev/null || true
-          du -sh ./action_build/staging_dir 2>/dev/null || true
-          du -sh ./firmware 2>/dev/null || true
-          echo "Firmware file count: $(ls -1 ./firmware 2>/dev/null | wc -l)"
           echo "===================================================="
 
-      - name: Upload Firmware
+  upload:
+    needs: build
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Download Firmware Artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: firmware_${{ inputs.model }}_${{ needs.build.outputs.build_date }}
+          path: ./firmware
+
+      - name: Check Firmware
+        run: |
+          echo "========下载的固件========"
+          ls -lh ./firmware/
+          UPLOAD_SIZE=$(du -sm ./firmware 2>/dev/null | cut -f1)
+          echo "上传大小: ${UPLOAD_SIZE}MB"
+          echo "========================"
+
+      - name: Upload to Artifact (Long-term)
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ env.BUILD_DATE }}_${{ inputs.model }}
+          name: ${{ needs.build.outputs.build_date }}_${{ inputs.model }}
           path: ./firmware/*
           retention-days: 7
           compression-level: 9
-          if-no-files-found: error
-
-      - name: Check Upload Size
-        run: |
-          echo "========上传文件统计========"
-          UPLOAD_SIZE=$(du -sm ./firmware 2>/dev/null | cut -f1)
-          echo "上传大小: ${UPLOAD_SIZE}MB"
-          
-          # GitHub Actions artifact 单次上传建议不超过2GB
-          if [ $UPLOAD_SIZE -gt 2048 ]; then
-            echo "⚠️ 警告: 上传大小超过2GB，可能影响下载速度"
-          fi
-          echo "============================"
-
-      - name: Clean Build Files
-        if: always()
-        run: |
-          echo "========清理构建文件========"
-          # 清理大型临时文件，保留固件和缓存
-          if [ -d "./action_build" ]; then
-            cd ./action_build
-            # 清理下载的源码包（可重新下载）
-            rm -rf dl/ 2>/dev/null || true
-            # 清理编译输出（除了固件）
-            find ./bin -type f ! -name "*.bin" ! -name "*.img" ! -name "*.gz" -delete 2>/dev/null || true
-            # 清理临时文件
-            rm -rf tmp/ 2>/dev/null || true
-            rm -rf logs/ 2>/dev/null || true
-          fi
-          
-          echo "========磁盘使用情况========"
-          df -h
-          echo "============================"
