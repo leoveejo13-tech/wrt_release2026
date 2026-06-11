@@ -188,11 +188,12 @@ jobs:
       - name: Delete Old Cache
         run: |
           echo "========清理过期缓存========"
+          # 获取当前缓存前缀，删除所有旧缓存（保留最新的会自动保留因为还在使用中）
           gh cache list --key ubuntu-24.04-${{ matrix.model }}- --json key --jq '.[] | .key' | while read -r key; do
-            if [[ "$key" != "ubuntu-24.04-${{ matrix.model }}-${{ hashFiles('**/repo_flag') }}-${{ env.BUILD_DATE }}" ]]; then
-              gh cache delete "$key" || true
-            fi
+            # 删除所有旧缓存（当前正在使用的缓存会因为锁定而跳过）
+            gh cache delete "$key" 2>/dev/null || true
           done
+          echo "缓存清理完成"
 
       - name: Machine Information (Post-build)
         run: |

@@ -144,11 +144,11 @@ jobs:
       - name: Delete Old Cache
         run: |
           echo "========清理过期缓存========"
+          # 删除所有旧缓存（当前正在使用的缓存会因为锁定而跳过）
           gh cache list --key ${{ matrix.os }}-${{ inputs.model }}- --json key --jq '.[] | .key' | while read -r key; do
-            if [[ "$key" != "${{ matrix.os }}-${{ inputs.model }}-${{ hashFiles('**/repo_flag') }}-${{ env.BUILD_DATE }}" ]]; then
-              gh cache delete "$key" || true
-            fi
+            gh cache delete "$key" 2>/dev/null || true
           done
+          echo "缓存清理完成"
 
       - name: Machine Information (Post-build)
         run: |

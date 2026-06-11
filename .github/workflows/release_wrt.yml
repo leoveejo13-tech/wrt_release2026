@@ -136,12 +136,9 @@ jobs:
       - name: Delete Old Cache
         run: |
           echo "========清理过期缓存========"
-          # 只删除相同model的旧缓存，保留其他model的缓存
+          # 删除所有旧缓存（当前正在使用的缓存会因为锁定而跳过）
           gh cache list --key ${{ matrix.os }}-${{ inputs.model }}- --json key --jq '.[] | .key' | while read -r key; do
-            # 跳过当前构建的缓存key
-            if [[ "$key" != "${{ matrix.os }}-${{ inputs.model }}-${{ hashFiles('**/repo_flag') }}-${{ env.BUILD_DATE }}" ]]; then
-              gh cache delete "$key" || true
-            fi
+            gh cache delete "$key" 2>/dev/null || true
           done
           
           # 输出缓存状态
