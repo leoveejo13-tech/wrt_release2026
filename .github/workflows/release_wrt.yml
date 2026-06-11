@@ -187,9 +187,6 @@ jobs:
             gh cache delete "$key" 2>/dev/null || true
           done
           echo "缓存清理完成"
-        with:
-          name: firmware_${{ inputs.model }}_${{ needs.build.outputs.build_date }}
-          path: ./firmware
 
       - name: Package OpenWrt Firmware
         if: ${{ inputs.model == 'n1_immwrt' }}
