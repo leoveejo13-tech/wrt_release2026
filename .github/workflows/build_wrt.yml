@@ -122,16 +122,6 @@ jobs:
       - name: Build Firmware
         run: ./build.sh ${{ inputs.model }}
 
-      - name: Check Firmware
-        run: |
-          echo "========固件检查========"
-          ls -lh ./firmware/
-          FIRMWARE_SIZE=$(du -sm ./firmware 2>/dev/null | cut -f1)
-          FIRMWARE_COUNT=$(find ./firmware -type f -name "*sysupgrade*" 2>/dev/null | wc -l)
-          echo "固件数量: ${FIRMWARE_COUNT}"
-          echo "固件总大小: ${FIRMWARE_SIZE}MB"
-          echo "======================="
-
       - name: Upload Firmware Artifact
         uses: actions/upload-artifact@v6
         with:
@@ -140,15 +130,6 @@ jobs:
           retention-days: 1
           compression-level: 9
           if-no-files-found: error
-
-      - name: Delete Old Cache
-        run: |
-          echo "========清理过期缓存========"
-          # 删除所有旧缓存（当前正在使用的缓存会因为锁定而跳过）
-          gh cache list --key ${{ matrix.os }}-${{ inputs.model }}- --json key --jq '.[] | .key' | while read -r key; do
-            gh cache delete "$key" 2>/dev/null || true
-          done
-          echo "缓存清理完成"
 
       - name: Machine Information (Post-build)
         run: |
@@ -177,6 +158,15 @@ jobs:
           UPLOAD_SIZE=$(du -sm ./firmware 2>/dev/null | cut -f1)
           echo "上传大小: ${UPLOAD_SIZE}MB"
           echo "========================"
+
+      - name: Delete Old Cache
+        run: |
+          echo "========清理过期缓存========"
+          # 删除所有旧缓存（当前正在使用的缓存会因为锁定而跳过）
+          gh cache list --key ubuntu-24.04-${{ inputs.model }}- --json key --jq '.[] | .key' | while read -r key; do
+            gh cache delete "$key" 2>/dev/null || true
+          done
+          echo "缓存清理完成"
 
       - name: Upload to Artifact (Long-term)
         uses: actions/upload-artifact@v6

@@ -1,5 +1,5 @@
 # 自动定期编译工作流
-# 功能：监听上游源码仓库变动，自动触发编译
+# 功能：监听上游源码仓库变动，自动触发对应设备编译
 
 name: Auto-Build
 
@@ -19,7 +19,10 @@ jobs:
   check-updates:
     runs-on: ubuntu-latest
     outputs:
-      should_build: ${{ steps.check.outputs.should_build }}
+      should_build_vikingyfy: ${{ steps.check.outputs.should_build_vikingyfy }}
+      should_build_chasey: ${{ steps.check.outputs.should_build_chasey }}
+      vikingyfy_commit: ${{ steps.check.outputs.vikingyfy_commit }}
+      chasey_commit: ${{ steps.check.outputs.chasey_commit }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6.0.2
@@ -32,28 +35,44 @@ jobs:
           # 检查 VIKINGYFY/immortalwrt (owrt分支) 的最新提交
           VIKINGYFY_COMMIT=$(git ls-remote https://github.com/VIKINGYFY/immortalwrt.git refs/heads/owrt | cut -f1)
           echo "VIKINGYFY/immortalwrt@owrt: $VIKINGYFY_COMMIT"
+          echo "vikingyfy_commit=$VIKINGYFY_COMMIT" >> $GITHUB_OUTPUT
           
           # 检查 chasey-dev/immortalwrt-mt798x-rebase (25.12分支) 的最新提交
           CHASEY_COMMIT=$(git ls-remote https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git refs/heads/25.12 | cut -f1)
           echo "chasey-dev/immortalwrt-mt798x-rebase@25.12: $CHASEY_COMMIT"
+          echo "chasey_commit=$CHASEY_COMMIT" >> $GITHUB_OUTPUT
           
           # 检查是否有记录文件
           LAST_VIKINGYFY=""
           LAST_CHASEY=""
           if [ -f ".github/last_build_commits.txt" ]; then
-            LAST_VIKINGYFY=$(grep "VIKINGYFY:" .github/last_build_commits.txt | cut -d: -f2)
-            LAST_CHASEY=$(grep "CHASEY:" .github/last_build_commits.txt | cut -d: -f2)
+            LAST_VIKINGYFY=$(grep "VIKINGYFY:" .github/last_build_commits.txt 2>/dev/null | cut -d: -f2)
+            LAST_CHASEY=$(grep "CHASEY:" .github/last_build_commits.txt 2>/dev/null | cut -d: -f2)
           fi
           
           echo "上次编译 VIKINGYFY: $LAST_VIKINGYFY"
           echo "上次编译 CHASEY: $LAST_CHASEY"
           
-          # 判断是否需要编译
+          # 判断是否需要编译 VIKINGYFY 源码的设备
+          if [ "$VIKINGYFY_COMMIT" != "$LAST_VIKINGYFY" ]; then
+            echo "✅ VIKINGYFY 源码有更新，触发 MEDIATEK-WIFI 设备编译"
+            echo "should_build_vikingyfy=true" >> $GITHUB_OUTPUT
+          else
+            echo "⏭️ VIKINGYFY 源码无更新"
+            echo "should_build_vikingyfy=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # 判断是否需要编译 CHASEY 源码的设备
+          if [ "$CHASEY_COMMIT" != "$LAST_CHASEY" ]; then
+            echo "✅ CHASEY 源码有更新，触发 jdcloud_ax6000 编译"
+            echo "should_build_chasey=true" >> $GITHUB_OUTPUT
+          else
+            echo "⏭️ CHASEY 源码无更新"
+            echo "should_build_chasey=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # 如果有任何更新，记录新的提交
           if [ "$VIKINGYFY_COMMIT" != "$LAST_VIKINGYFY" ] || [ "$CHASEY_COMMIT" != "$LAST_CHASEY" ]; then
-            echo "✅ 检测到上游更新，触发编译"
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            
-            # 记录新的提交
             mkdir -p .github
             echo "VIKINGYFY:$VIKINGYFY_COMMIT" > .github/last_build_commits.txt
             echo "CHASEY:$CHASEY_COMMIT" >> .github/last_build_commits.txt
@@ -64,15 +83,13 @@ jobs:
             git add .github/last_build_commits.txt
             git commit -m "chore: 更新上游提交记录 [skip ci]" || true
             git push || true
-          else
-            echo "⏭️ 上游无更新，跳过编译"
-            echo "should_build=false" >> $GITHUB_OUTPUT
           fi
+          
           echo "================================"
 
-  build:
+  build-vikingyfy:
     needs: check-updates
-    if: needs.check-updates.outputs.should_build == 'true'
+    if: needs.check-updates.outputs.should_build_vikingyfy == 'true'
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -80,14 +97,12 @@ jobs:
         model:
           - MEDIATEK-WIFI-NO
           - MEDIATEK-WIFI-YES
-          - jdcloud_ax6000_immwrt
     
     runs-on: ubuntu-24.04
     
     outputs:
       build_date: ${{ steps.set-date.outputs.build_date }}
       build_src: ${{ steps.set-date.outputs.build_src }}
-      kernel_ver: ${{ steps.get-kver.outputs.kernel_ver }}
     
     steps:
       - name: Build System Setup
@@ -158,12 +173,149 @@ jobs:
       - name: Build Firmware
         run: ./build.sh ${{ matrix.model }}
 
+      - name: Upload Firmware Artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: firmware_${{ matrix.model }}_${{ env.BUILD_DATE }}
+          path: |
+            ./firmware/*
+          retention-days: 1
+          compression-level: 9
+
+      - name: Machine Information (Post-build)
+        run: |
+          echo "=============== Post-build Snapshot ==============="
+          echo "设备: ${{ matrix.model }}"
+          echo "=================================================="
+          echo "[Disk]"
+          df -hT
+          echo "===================================================="
+
+  build-chasey:
+    needs: check-updates
+    if: needs.check-updates.outputs.should_build_chasey == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        model:
+          - jdcloud_ax6000_immwrt
+    
+    runs-on: ubuntu-24.04
+    
+    outputs:
+      build_date: ${{ steps.set-date.outputs.build_date }}
+      build_src: ${{ steps.set-date.outputs.build_src }}
+    
+    steps:
+      - name: Build System Setup
+        run: |
+          # 清理磁盘空间
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc 2>/dev/null || true
+          sudo docker image prune -a -f 2>/dev/null || true
+          
+          # 安装编译环境
+          sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+          sudo -E apt -yqq install dos2unix libfuse-dev
+          sudo -E apt -yqq autoremove --purge
+          sudo -E apt -yqq autoclean
+          sudo -E apt -yqq clean
+          sudo -E systemctl daemon-reload
+          
+          echo "========初始磁盘空间========"
+          df -h
+          echo "============================"
+
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Set Build Date and Timezone
+        id: set-date
+        run: |
+          sudo -E timedatectl set-timezone "Asia/Shanghai"
+          BUILD_DATE=$(TZ=UTC-8 date +"%y.%m.%d_%H.%M.%S")
+          echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
+          echo "build_date=$BUILD_DATE" >> $GITHUB_OUTPUT
+          
+          BUILD_SRC=$(awk -F"=" '/REPO_URL/ {print $NF}' "./wrt_core/compilecfg/${{ matrix.model }}.ini")
+          echo "BUILD_SRC=$BUILD_SRC" >> $GITHUB_ENV
+          echo "build_src=$BUILD_SRC" >> $GITHUB_OUTPUT
+
+      - name: Pre Clone
+        run: ./wrt_core/pre_clone_action.sh ${{ matrix.model }}
+
+      - name: Cache Dependencies
+        uses: actions/cache@v5.0.2
+        with:
+          path: |
+            ./action_build/.ccache
+            ./action_build/staging_dir
+          key: ubuntu-24.04-${{ matrix.model }}-${{ hashFiles('**/repo_flag') }}-${{ env.BUILD_DATE }}
+          restore-keys: |
+            ubuntu-24.04-${{ matrix.model }}-${{ hashFiles('**/repo_flag') }}-
+            ubuntu-24.04-${{ matrix.model }}-
+
+      - name: Refresh the cache
+        run: |
+          if [ -d "./action_build/staging_dir" ]; then
+            find "./action_build/staging_dir" -type d -name "stamp" -not -path "*target*" | while read -r dir; do
+                find "$dir" -type f -exec touch {} +
+            done
+          fi
+
+      - name: Machine Information (Pre-build)
+        run: |
+          echo "=============== Pre-build Snapshot ==============="
+          echo "设备: ${{ matrix.model }}"
+          echo "Time: $(date '+%F %T %Z')"
+          echo "=================================================="
+          echo "[Disk]"
+          df -hT
+          echo "=================================================="
+
+      - name: Build Firmware
+        run: ./build.sh ${{ matrix.model }}
+
+      - name: Upload Firmware Artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: firmware_${{ matrix.model }}_${{ env.BUILD_DATE }}
+          path: |
+            ./firmware/*
+          retention-days: 1
+          compression-level: 9
+
+      - name: Machine Information (Post-build)
+        run: |
+          echo "=============== Post-build Snapshot ==============="
+          echo "设备: ${{ matrix.model }}"
+          echo "=================================================="
+          echo "[Disk]"
+          df -hT
+          echo "===================================================="
+
+  upload-vikingyfy:
+    needs: build-vikingyfy
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        model:
+          - MEDIATEK-WIFI-NO
+          - MEDIATEK-WIFI-YES
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Download Firmware Artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: firmware_${{ matrix.model }}_${{ needs.build-vikingyfy.outputs.build_date }}
+          path: ./firmware
+
       - name: Get Kernel Version
-        id: get-kver
         run: |
           KVER=$(grep -oP "^kernel.*" ./firmware/*.manifest | grep -oP "[4-6]\.[0-9]{1,3}\.[0-9]{1,3}" | head -1)
           echo "KVER=$KVER" >> $GITHUB_ENV
-          echo "kernel_ver=$KVER" >> $GITHUB_OUTPUT
           echo "Kernel version: $KVER"
 
       - name: Check Firmware
@@ -176,64 +328,22 @@ jobs:
           echo "固件总大小: ${FIRMWARE_SIZE}MB"
           echo "======================="
 
-      - name: Upload Firmware Artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: firmware_${{ matrix.model }}_${{ env.BUILD_DATE }}
-          path: |
-            ./firmware/*
-          retention-days: 1
-          compression-level: 9
-
       - name: Delete Old Cache
         run: |
           echo "========清理过期缓存========"
-          # 获取当前缓存前缀，删除所有旧缓存（保留最新的会自动保留因为还在使用中）
           gh cache list --key ubuntu-24.04-${{ matrix.model }}- --json key --jq '.[] | .key' | while read -r key; do
-            # 删除所有旧缓存（当前正在使用的缓存会因为锁定而跳过）
             gh cache delete "$key" 2>/dev/null || true
           done
           echo "缓存清理完成"
-
-      - name: Machine Information (Post-build)
-        run: |
-          echo "=============== Post-build Snapshot ==============="
-          echo "设备: ${{ matrix.model }}"
-          echo "=================================================="
-          echo "[Disk]"
-          df -hT
-          echo "===================================================="
-
-  upload:
-    needs: build
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        model:
-          - MEDIATEK-WIFI-NO
-          - MEDIATEK-WIFI-YES
-          - jdcloud_ax6000_immwrt
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6.0.2
-
-      - name: Download Firmware Artifact
-        uses: actions/download-artifact@v6
-        with:
-          name: firmware_${{ matrix.model }}_${{ needs.build.outputs.build_date }}
-          path: ./firmware
 
       - name: Prepare Release Body
         run: |
           echo "上游更新自动编译" > release_body.txt
           echo "设备: ${{ matrix.model }}" >> release_body.txt
-          echo "源码：${{ needs.build.outputs.build_src }}" >> release_body.txt
-          echo "Kernel: ${{ needs.build.outputs.kernel_ver }}" >> release_body.txt
+          echo "源码：${{ needs.build-vikingyfy.outputs.build_src }}" >> release_body.txt
+          echo "Kernel: $KVER" >> release_body.txt
           echo "" >> release_body.txt
-          echo "上游仓库：" >> release_body.txt
-          echo "- VIKINGYFY/immortalwrt@owrt" >> release_body.txt
-          echo "- chasey-dev/immortalwrt-mt798x-rebase@25.12" >> release_body.txt
+          echo "上游仓库：VIKINGYFY/immortalwrt@owrt" >> release_body.txt
           echo "" >> release_body.txt
           echo "WIFI密码: 12345678" >> release_body.txt
           echo "LAN地址: 192.168.1.1" >> release_body.txt
@@ -244,6 +354,70 @@ jobs:
       - name: Release Firmware
         uses: softprops/action-gh-release@v2.5.0
         with:
-          tag_name: ${{ needs.build.outputs.build_date }}_${{ matrix.model }}
+          tag_name: ${{ needs.build-vikingyfy.outputs.build_date }}_${{ matrix.model }}
+          files: ./firmware/*
+          body_path: ./release_body.txt
+
+  upload-chasey:
+    needs: build-chasey
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        model:
+          - jdcloud_ax6000_immwrt
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Download Firmware Artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: firmware_${{ matrix.model }}_${{ needs.build-chasey.outputs.build_date }}
+          path: ./firmware
+
+      - name: Get Kernel Version
+        run: |
+          KVER=$(grep -oP "^kernel.*" ./firmware/*.manifest | grep -oP "[4-6]\.[0-9]{1,3}\.[0-9]{1,3}" | head -1)
+          echo "KVER=$KVER" >> $GITHUB_ENV
+          echo "Kernel version: $KVER"
+
+      - name: Check Firmware
+        run: |
+          echo "========固件检查========"
+          ls -lh ./firmware/
+          FIRMWARE_SIZE=$(du -sm ./firmware 2>/dev/null | cut -f1)
+          FIRMWARE_COUNT=$(find ./firmware -type f -name "*sysupgrade*" 2>/dev/null | wc -l)
+          echo "固件数量: ${FIRMWARE_COUNT}"
+          echo "固件总大小: ${FIRMWARE_SIZE}MB"
+          echo "======================="
+
+      - name: Delete Old Cache
+        run: |
+          echo "========清理过期缓存========"
+          gh cache list --key ubuntu-24.04-${{ matrix.model }}- --json key --jq '.[] | .key' | while read -r key; do
+            gh cache delete "$key" 2>/dev/null || true
+          done
+          echo "缓存清理完成"
+
+      - name: Prepare Release Body
+        run: |
+          echo "上游更新自动编译" > release_body.txt
+          echo "设备: ${{ matrix.model }}" >> release_body.txt
+          echo "源码：${{ needs.build-chasey.outputs.build_src }}" >> release_body.txt
+          echo "Kernel: $KVER" >> release_body.txt
+          echo "" >> release_body.txt
+          echo "上游仓库：chasey-dev/immortalwrt-mt798x-rebase@25.12" >> release_body.txt
+          echo "" >> release_body.txt
+          echo "WIFI密码: 12345678" >> release_body.txt
+          echo "LAN地址: 192.168.1.1" >> release_body.txt
+          echo "" >> release_body.txt
+          echo "插件列表：" >> release_body.txt
+          grep -oP "luci-app(-[a-zA-Z0-9]{1,}){1,}" ./firmware/*.manifest 2>/dev/null | awk -F":" '{print $NF}' >> release_body.txt || echo "N/A" >> release_body.txt
+
+      - name: Release Firmware
+        uses: softprops/action-gh-release@v2.5.0
+        with:
+          tag_name: ${{ needs.build-chasey.outputs.build_date }}_${{ matrix.model }}
           files: ./firmware/*
           body_path: ./release_body.txt
