@@ -147,9 +147,8 @@ jobs:
           path: |
             ./action_build/.ccache
             ./action_build/staging_dir
-          key: ubuntu-24.04-${{ matrix.model }}-${{ hashFiles('**/repo_flag') }}-${{ env.BUILD_DATE }}
+          key: ubuntu-24.04-${{ matrix.model }}-${{ env.BUILD_DATE }}
           restore-keys: |
-            ubuntu-24.04-${{ matrix.model }}-${{ hashFiles('**/repo_flag') }}-
             ubuntu-24.04-${{ matrix.model }}-
 
       - name: Refresh the cache
@@ -249,9 +248,8 @@ jobs:
           path: |
             ./action_build/.ccache
             ./action_build/staging_dir
-          key: ubuntu-24.04-${{ matrix.model }}-${{ hashFiles('**/repo_flag') }}-${{ env.BUILD_DATE }}
+          key: ubuntu-24.04-${{ matrix.model }}-${{ env.BUILD_DATE }}
           restore-keys: |
-            ubuntu-24.04-${{ matrix.model }}-${{ hashFiles('**/repo_flag') }}-
             ubuntu-24.04-${{ matrix.model }}-
 
       - name: Refresh the cache

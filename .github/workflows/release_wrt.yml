@@ -87,9 +87,8 @@ jobs:
           path: |
             ./action_build/.ccache
             ./action_build/staging_dir
-          key: ${{ matrix.os }}-${{ inputs.model }}-${{ hashFiles('**/repo_flag') }}-${{ env.BUILD_DATE }}
+          key: ${{ matrix.os }}-${{ inputs.model }}-${{ env.BUILD_DATE }}
           restore-keys: |
-            ${{ matrix.os }}-${{ inputs.model }}-${{ hashFiles('**/repo_flag') }}-
             ${{ matrix.os }}-${{ inputs.model }}-
 
       - name: Refresh the cache
