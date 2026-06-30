@@ -351,7 +351,7 @@ jobs:
           echo "上游仓库：VIKINGYFY/immortalwrt@owrt" >> release_body.txt
           echo "" >> release_body.txt
           echo "WIFI密码: 12345678" >> release_body.txt
-          echo "LAN地址: 192.168.1.1" >> release_body.txt
+          echo "LAN地址: 192.168.2.1" >> release_body.txt
           echo "" >> release_body.txt
           echo "插件列表：" >> release_body.txt
           grep -oP "luci-app(-[a-zA-Z0-9]{1,}){1,}" ./firmware/*.manifest 2>/dev/null | awk -F":" '{print $NF}' >> release_body.txt || echo "N/A" >> release_body.txt
