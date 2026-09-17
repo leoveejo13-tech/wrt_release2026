@@ -100,10 +100,28 @@ fix_default_set() {
     install -Dm544 "$BASE_PATH/patches/991_custom_settings" "$BUILD_DIR/package/base-files/files/etc/uci-defaults/991_custom_settings"
     install -Dm544 "$BASE_PATH/patches/992_set-wifi-uci.sh" "$BUILD_DIR/package/base-files/files/etc/uci-defaults/992_set-wifi-uci.sh"
 
-    if [ -f "$BUILD_DIR/package/emortal/autocore/files/tempinfo" ]; then
-        if [ -f "$BASE_PATH/patches/tempinfo" ]; then
-            \cp -f "$BASE_PATH/patches/tempinfo" "$BUILD_DIR/package/emortal/autocore/files/tempinfo"
+    if [ -f "$BUILD_DIR/package/emortal/autocore/files/tempinfo" ] && [ -f "$BASE_PATH/patches/autocore-tempinfo-hwmon.patch" ]; then
+        if grep -q "hwmon driver name" "$BUILD_DIR/package/emortal/autocore/files/tempinfo"; then
+            : # already applied
+        elif (cd "$BUILD_DIR" && patch -p1 -N -r - -s < "$BASE_PATH/patches/autocore-tempinfo-hwmon.patch"); then
+            echo "Applied autocore-tempinfo-hwmon patch"
+        else
+            echo "WARNING: autocore-tempinfo-hwmon.patch failed to apply cleanly - rebase needed" >&2
         fi
+    fi
+}
+
+# velocloud_5x0: applied in stage_post_install_package_fixes (after feeds are
+# fully installed; running this earlier can silently miss the feed dir).
+apply_velocloud_feed_patches() {
+    # istore home-page CPU temperature fallback (coreboot has no
+    # thermal_zone0; C2558 coretemp exposes only temp2..temp5). A reject here
+    # means the feed file drifted - rebase the patch, don't shadow it.
+    local istore_lua="$BUILD_DIR/feeds/custom_feed/luci-app-quickstart/luasrc/controller/istore_backend.lua"
+    if [ -f "$istore_lua" ] && [ -f "$BASE_PATH/patches/istore_backend-lua.patch" ]; then
+        (cd "$BUILD_DIR/feeds/custom_feed/luci-app-quickstart" && patch -p1 -N -r - -s < "$BASE_PATH/patches/istore_backend-lua.patch") \
+            && echo "Applied istore_backend.lua velocloud_5x0 patch" \
+            || echo "WARNING: istore_backend-lua.patch failed to apply cleanly - rebase needed" >&2
     fi
 }
 
