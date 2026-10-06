@@ -71,6 +71,41 @@ update_homeproxy() {
 }
 
 
+fetch_lucky_release_index() {
+    local directory_url="$1"
+    local output_file="$2"
+    local cache_key
+    cache_key="$(date +%s%N)-${RANDOM}"
+
+    # The CDN has served cached HTML for requests that ask for JSON even though
+    # the response varies on Accept. Use a unique directory query to reach the
+    # JSON representation instead of a previously cached browser page.
+    if ! curl_retry -fsSL \
+        -H "Accept: application/json" \
+        -H "Cache-Control: no-cache" \
+        -o "$output_file" \
+        "${directory_url}?sort=namedirfirst&order=asc&_=${cache_key}"; then
+        return 1
+    fi
+
+    python3 - "$output_file" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        payload = json.load(stream)
+except (OSError, UnicodeError, json.JSONDecodeError) as error:
+    print(f"Lucky 目录服务未返回有效 JSON: {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+if not isinstance(payload, list):
+    print("Lucky 目录服务返回了非数组 JSON。", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+
 resolve_latest_lucky_release() {
     local release_base_url="https://release.66666.host"
     local root_index
@@ -80,7 +115,7 @@ resolve_latest_lucky_release() {
     version_index=$(mktemp)
     lucky_index=$(mktemp)
 
-    if ! curl_retry -fsSL -H "Accept: application/json" -o "$root_index" "$release_base_url/"; then
+    if ! fetch_lucky_release_index "$release_base_url/" "$root_index"; then
         echo "错误：无法获取 Lucky 发布目录。" >&2
         rm -f "$root_index" "$version_index" "$lucky_index"
         return 1
@@ -111,7 +146,7 @@ PY
         return 1
     }
 
-    if ! curl_retry -fsSL -H "Accept: application/json" -o "$version_index" "$release_base_url/$release_dir/"; then
+    if ! fetch_lucky_release_index "$release_base_url/$release_dir/" "$version_index"; then
         echo "错误：无法获取 Lucky 版本目录 $release_dir。" >&2
         rm -f "$root_index" "$version_index" "$lucky_index"
         return 1
@@ -128,7 +163,7 @@ with open(sys.argv[1], encoding="utf-8") as stream:
 
 candidates = [
     entry for entry in entries
-    if entry.get("is_dir") and re.fullmatch(r"[0-9]+(?:\.[0-9]+)+_lucky", entry.get("name", ""))
+    if entry.get("is_dir") and re.fullmatch(r"[0-9]+(?:\.[0-9]+)+_wanji_docker", entry.get("name", ""))
 ]
 if not candidates:
     raise SystemExit(1)
@@ -137,13 +172,13 @@ latest = max(candidates, key=lambda entry: entry.get("mod_time", ""))
 print(latest["name"])
 PY
     ) || {
-        echo "错误：$release_dir 中没有纯 Lucky 发布目录。" >&2
+        echo "错误：$release_dir 中没有 wanji_docker 发布目录。" >&2
         rm -f "$root_index" "$version_index" "$lucky_index"
         return 1
     }
 
-    local lucky_version="${lucky_release_dir%_lucky}"
-    if ! curl_retry -fsSL -H "Accept: application/json" -o "$lucky_index" "$release_base_url/$release_dir/$lucky_release_dir/"; then
+    local lucky_version="${lucky_release_dir%_wanji_docker}"
+    if ! fetch_lucky_release_index "$release_base_url/$release_dir/$lucky_release_dir/" "$lucky_index"; then
         echo "错误：无法获取 Lucky 文件目录 $release_dir/$lucky_release_dir。" >&2
         rm -f "$root_index" "$version_index" "$lucky_index"
         return 1
@@ -159,8 +194,8 @@ with open(sys.argv[1], encoding="utf-8") as stream:
 version = sys.argv[2]
 names = {entry.get("name") for entry in entries if not entry.get("is_dir")}
 required = {
-    f"lucky_{version}_Linux_arm64.tar.gz",
-    f"lucky_{version}_Linux_x86_64.tar.gz",
+    f"lucky_{version}_Linux_arm64_wanji_docker.tar.gz",
+    f"lucky_{version}_Linux_x86_64_wanji_docker.tar.gz",
 }
 missing = required - names
 if missing:
@@ -229,7 +264,7 @@ update_lucky() {
 
     local release_info
     if ! release_info=$(resolve_latest_lucky_release); then
-        echo "Warning: Lucky 最新版本解析失败，保留上游纯 Lucky 下载逻辑。" >&2
+        echo "Warning: Lucky 最新版本解析失败，保留上游下载配置。" >&2
         return 0
     fi
 
@@ -242,7 +277,6 @@ update_lucky() {
     echo "正在更新 lucky Makefile: $release_dir/$lucky_release_dir..."
     if ! python3 - "$makefile_path" "$lucky_version" "$download_base_url" <<'PY'
 import pathlib
-import re
 import sys
 
 makefile = pathlib.Path(sys.argv[1])
@@ -250,42 +284,19 @@ version = sys.argv[2]
 download_base_url = sys.argv[3].rstrip("/")
 lines = makefile.read_text(encoding="utf-8").splitlines(keepends=True)
 
-version_count = 0
-for index, line in enumerate(lines):
-    if line.startswith("PKG_VERSION:="):
-        lines[index] = f"PKG_VERSION:={version}\n"
-        version_count += 1
-
-if version_count != 1:
-    raise SystemExit("Lucky Makefile 中未找到唯一的 PKG_VERSION")
-
-prepare_start = next((index for index, line in enumerate(lines) if line.strip() == "define Build/Prepare"), None)
-if prepare_start is None:
-    raise SystemExit("Lucky Makefile 中未找到 Build/Prepare")
-
-prepare_end = next(
-    (index for index in range(prepare_start + 1, len(lines)) if lines[index].strip() == "endef"),
-    None,
-)
-if prepare_end is None:
-    raise SystemExit("Lucky Makefile 的 Build/Prepare 未闭合")
-
-download_line = (
-    "\t[ ! -f $(PKG_BUILD_DIR)/$(PKG_NAME)_$(PKG_VERSION)_Linux_$(LUCKY_ARCH).tar.gz ] "
-    f"&& wget --tries=3 --timeout=30 {download_base_url}/$(PKG_NAME)_$(PKG_VERSION)_Linux_$(LUCKY_ARCH).tar.gz "
-    "-O $(PKG_BUILD_DIR)/$(PKG_NAME)_$(PKG_VERSION)_Linux_$(LUCKY_ARCH).tar.gz\n"
-)
-
-download_indexes = [
-    index for index in range(prepare_start + 1, prepare_end)
-    if "wget " in lines[index] or "wrt_core/patches/lucky_" in lines[index]
-]
-if download_indexes:
-    lines[download_indexes[0]] = download_line
-    for index in reversed(download_indexes[1:]):
-        del lines[index]
-else:
-    lines.insert(prepare_start + 1, download_line)
+assignments = {
+    "PKG_VERSION": version,
+    "PKG_SOURCE": "$(PKG_NAME)_$(PKG_VERSION)_Linux_$(LUCKY_ARCH)_wanji_docker.tar.gz",
+    "PKG_SOURCE_URL": download_base_url,
+}
+for name, value in assignments.items():
+    indexes = [
+        index for index, line in enumerate(lines)
+        if line.startswith(f"{name}:=")
+    ]
+    if len(indexes) != 1:
+        raise SystemExit(f"Lucky Makefile 中未找到唯一的 {name}")
+    lines[indexes[0]] = f"{name}:={value}\n"
 
 makefile.write_text("".join(lines), encoding="utf-8")
 PY
@@ -294,7 +305,7 @@ PY
         return 0
     fi
 
-    echo "lucky Makefile 已切换到纯 Lucky $lucky_version：$download_base_url"
+    echo "lucky Makefile 已切换到 wanji_docker 版 Lucky $lucky_version：$download_base_url"
 }
 
 

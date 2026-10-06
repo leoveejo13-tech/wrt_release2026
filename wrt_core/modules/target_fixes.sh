@@ -87,6 +87,22 @@ PY
     echo "已禁用 APK 国内镜像替换，保留 OpenWrt 官方软件源。"
 }
 
+fix_autocore_mtwifi_temperature() {
+    local tempinfo="$BUILD_DIR/package/emortal/autocore/files/tempinfo"
+    local patch_file="$BASE_PATH/patches/autocore-tempinfo-mtwifi.patch"
+
+    [ -f "$tempinfo" ] && [ -f "$patch_file" ] || return 0
+    grep -q 'get_mtwifi_temp()' "$tempinfo" || return 0
+    grep -q 'local mtwifi_present=0' "$tempinfo" && return 0
+
+    if (cd "$BUILD_DIR" && patch -p1 -N -r - -s < "$patch_file"); then
+        echo "Applied autocore-tempinfo-mtwifi patch"
+    else
+        echo "ERROR: autocore-tempinfo-mtwifi.patch failed to apply cleanly" >&2
+        return 1
+    fi
+}
+
 fix_default_set() {
     # 注入默认主题、系统设置和目标平台通用补丁。
     if [ -d "$BUILD_DIR/feeds/luci/collections/" ]; then
@@ -109,11 +125,22 @@ fix_default_set() {
             echo "WARNING: autocore-tempinfo-hwmon.patch failed to apply cleanly - rebase needed" >&2
         fi
     fi
+
+    fix_autocore_mtwifi_temperature || return 1
+
+    # rpcd: legacy iStoreOS backends (quickstartd) require values.token in
+    # session data. Dropping the patch file into the package's patches/ dir
+    # lets the package build apply it to the extracted source.
+    if [ -d "$BUILD_DIR/package/system/rpcd" ] && [ -f "$BASE_PATH/patches/rpcd-session-values-token.patch" ]; then
+        mkdir -p "$BUILD_DIR/package/system/rpcd/patches"
+        \cp -f "$BASE_PATH/patches/rpcd-session-values-token.patch" \
+            "$BUILD_DIR/package/system/rpcd/patches/999-session-values-token.patch"
+    fi
 }
 
 # velocloud_5x0: applied in stage_post_install_package_fixes (after feeds are
 # fully installed; running this earlier can silently miss the feed dir).
-apply_velocloud_feed_patches() {
+apply_custom_feed_patches() {
     # istore home-page CPU temperature fallback (coreboot has no
     # thermal_zone0; C2558 coretemp exposes only temp2..temp5). A reject here
     # means the feed file drifted - rebase the patch, don't shadow it.
@@ -122,6 +149,84 @@ apply_velocloud_feed_patches() {
         (cd "$BUILD_DIR/feeds/custom_feed/luci-app-quickstart" && patch -p1 -N -r - -s < "$BASE_PATH/patches/istore_backend-lua.patch") \
             && echo "Applied istore_backend.lua velocloud_5x0 patch" \
             || echo "WARNING: istore_backend-lua.patch failed to apply cleanly - rebase needed" >&2
+    fi
+
+    # appfilter bundles the LuCI ACL json that luci-app-oaf also ships;
+    # apk rejects the duplicate file. The LuCI app is the proper owner.
+    local oaf_mk="$BUILD_DIR/feeds/custom_feed/open-app-filter/Makefile"
+    if [ -f "$oaf_mk" ] && [ -f "$BASE_PATH/patches/open-app-filter-no-bundled-acl.patch" ]; then
+        if (cd "$BUILD_DIR/feeds/custom_feed/open-app-filter" && patch -p1 -N -r - -s < "$BASE_PATH/patches/open-app-filter-no-bundled-acl.patch"); then
+            echo "Applied open-app-filter no-bundled-acl patch"
+            # force rebuild+repackage: drop build dir and the stale apk
+            rm -rf "$BUILD_DIR"/build_dir/target-*/open-app-filter* 2>/dev/null
+            rm -f "$BUILD_DIR"/bin/packages/*/custom_feed/appfilter-*.apk 2>/dev/null
+        else
+            echo "WARNING: open-app-filter-no-bundled-acl.patch failed to apply cleanly - rebase needed" >&2
+        fi
+    fi
+
+    # quickstart home tile links to /admin/services/appfilter, but luci-app-oaf
+    # registers /admin/services/oaf. Minified JS: sed is sturdier than a diff.
+    local qs_js="$BUILD_DIR/feeds/custom_feed/luci-app-quickstart/htdocs/luci-static/quickstart/index.js"
+    if [ -f "$qs_js" ] && grep -q "admin/services/appfilter" "$qs_js"; then
+        sed -i 's|admin/services/appfilter|admin/services/oaf|g' "$qs_js"
+        echo "Patched quickstart index.js appfilter -> oaf link"
+    fi
+
+    # Port card treats only linkState=="DOWN" as disconnected, so DSA slave
+    # ports (LOWERLAYERDOWN without cable) render as connected. UP = connected,
+    # everything else = disconnected.
+    if [ -f "$qs_js" ] && grep -q 'linkState=="DOWN"' "$qs_js"; then
+        sed -i 's|linkState=="DOWN"|linkState!="UP"|g' "$qs_js"
+        echo "Patched quickstart index.js linkState disconnected check"
+    fi
+
+    # Disk-info entries link to luci-app-diskman, but our builds ship
+    # luci-app-mini-diskmanager (both hrefs are the same diskman URL).
+    if [ -f "$qs_js" ] && grep -q "admin/system/diskman" "$qs_js"; then
+        sed -i 's|admin/system/diskman|admin/system/mini-diskmanager|g' "$qs_js"
+        echo "Patched quickstart index.js diskman -> mini-diskmanager link"
+    fi
+
+    # argon base font is 0.975rem (15.6px vs bootstrap 13px); use 0.875rem
+    # (14px). The sidenav brand title (1.8rem) overflows its column; use
+    # 1.4rem. Match bare values: upstream ships both minified and formatted
+    # variants of cascade.css and each value appears exactly once.
+    local argon_css="$BUILD_DIR/feeds/custom_feed/luci-theme-argon/htdocs/luci-static/argon/css/cascade.css"
+    if [ -f "$argon_css" ]; then
+        if grep -q "0\.975rem" "$argon_css"; then
+            sed -i 's/0\.975rem/0.875rem/g' "$argon_css"
+            echo "Patched argon base font-size 0.975rem -> 0.875rem"
+        fi
+        if grep -q "1\.8rem" "$argon_css"; then
+            sed -i 's/1\.8rem/1.4rem/g' "$argon_css"
+            echo "Patched argon sidenav brand 1.8rem -> 1.4rem"
+        fi
+    fi
+
+    # argon-config ships font_weight '600' (bold) as the default, both in the
+    # uci config and the settings form default; normal is the sane default.
+    local argon_cfg="$BUILD_DIR/feeds/custom_feed/luci-app-argon-config/root/etc/config/argon"
+    if [ -f "$argon_cfg" ] && grep -q "font_weight '600'" "$argon_cfg"; then
+        sed -i "s/option font_weight '600'/option font_weight 'normal'/" "$argon_cfg"
+        echo "Patched argon default font_weight 600 -> normal"
+    fi
+    local argon_js="$BUILD_DIR/feeds/custom_feed/luci-app-argon-config/htdocs/luci-static/resources/view/argon-config.js"
+    if [ -f "$argon_js" ] && grep -q "default = '600'\|o.default='600'" "$argon_js"; then
+        sed -i "s/default = '600'/default = 'normal'/; s/o.default='600'/o.default='normal'/" "$argon_js"
+        echo "Patched argon-config form default font -> normal"
+    fi
+
+    # smartdns 1.2025.47: git-repack tarball is on no mirror and its hash is
+    # not reproducible across toolchains; fetch the commit tarball from
+    # codeload instead (identical bytes everywhere). Self-retires when the
+    # feed bumps the version (grep guard stops matching).
+    local sd_mk="$BUILD_DIR/feeds/packages/net/smartdns/Makefile"
+    if [ -f "$sd_mk" ] && [ -f "$BASE_PATH/patches/smartdns-codeload.patch" ] \
+        && ! grep -q "codeload.github.com/pymumu/smartdns" "$sd_mk"; then
+        (cd "$BUILD_DIR/feeds/packages/net/smartdns" && patch -p1 -N -r - -s < "$BASE_PATH/patches/smartdns-codeload.patch") \
+            && echo "Applied smartdns codeload patch" \
+            || echo "WARNING: smartdns-codeload.patch failed to apply cleanly - rebase needed" >&2
     fi
 }
 
