@@ -25,6 +25,13 @@ remove_unwanted_packages() {
             "luci-app-aurora-config" "luci-theme-aurora"
         )
     fi
+    if [[ ${DAED_PACKAGES_ENABLED:-0} == "1" ]]; then
+        luci_packages+=("luci-app-daede")
+    fi
+    if [[ ${HONK_PACKAGES_ENABLED:-0} == "1" ]]; then
+        luci_packages+=("luci-app-honk")
+        packages_net+=("honk")
+    fi
     for pkg in "${luci_packages[@]}"; do
         if [[ -d ./feeds/luci/applications/$pkg ]]; then
             \rm -rf ./feeds/luci/applications/$pkg
@@ -74,17 +81,16 @@ update_homeproxy() {
 fetch_lucky_release_index() {
     local directory_url="$1"
     local output_file="$2"
+    local index_url="${directory_url%/}/.lucky-browse.json"
     local cache_key
     cache_key="$(date +%s%N)-${RANDOM}"
 
-    # The CDN has served cached HTML for requests that ask for JSON even though
-    # the response varies on Accept. Use a unique directory query to reach the
-    # JSON representation instead of a previously cached browser page.
+    # Lucky serves directory JSON at a separate endpoint; Accept alone returns HTML.
     if ! curl_retry -fsSL \
         -H "Accept: application/json" \
         -H "Cache-Control: no-cache" \
         -o "$output_file" \
-        "${directory_url}?sort=namedirfirst&order=asc&_=${cache_key}"; then
+        "${index_url}?sort=namedirfirst&order=asc&_=${cache_key}"; then
         return 1
     fi
 
@@ -132,12 +138,22 @@ with open(sys.argv[1], encoding="utf-8") as stream:
 
 candidates = [
     entry for entry in entries
-    if entry.get("is_dir") and re.fullmatch(r"v[0-9][0-9A-Za-z._-]*", entry.get("name", ""))
+    if entry.get("is_dir") and re.fullmatch(r"v[0-9]+(?:\.[0-9]+)+(?:[A-Za-z][0-9A-Za-z._-]*)?", entry.get("name", ""))
 ]
 if not candidates:
     raise SystemExit(1)
 
-latest = max(candidates, key=lambda entry: entry.get("mod_time", ""))
+def version_key(entry):
+    match = re.fullmatch(r"v([0-9]+(?:\.[0-9]+)+)(.*)", entry["name"])
+    numbers, suffix = match.groups()
+    suffix_key = tuple(
+        (1, int(part)) if part.isdigit() else (0, part.lower())
+        for part in re.findall(r"[0-9]+|[^0-9]+", suffix)
+    )
+    return tuple(map(int, numbers.split("."))), not suffix, suffix_key
+
+# Directory mtimes can change when old releases are repackaged.
+latest = max(candidates, key=version_key)
 print(latest["name"])
 PY
     ) || {
@@ -168,7 +184,10 @@ candidates = [
 if not candidates:
     raise SystemExit(1)
 
-latest = max(candidates, key=lambda entry: entry.get("mod_time", ""))
+latest = max(
+    candidates,
+    key=lambda entry: tuple(map(int, entry["name"].removesuffix("_wanji_docker").split("."))),
+)
 print(latest["name"])
 PY
     ) || {

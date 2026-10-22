@@ -9,6 +9,8 @@ imm-x64/
 lede/
 libwrt/
 immortalwrt/
+immortalwrt-daed/
+immortalwrt-honk/
 airoha-wrt/
 compilecfg/test.ini
 deconfig/test.config
