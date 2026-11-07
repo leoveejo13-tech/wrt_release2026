@@ -84,63 +84,6 @@ sync_sparse_packages_to_feed_dir() {
 }
 
 
-sync_all_top_level_packages_to_feed_dir() {
-    local repo_url="$1"
-    local repo_branch="$2"
-    local target_dir="$3"
-    local repo_label="$4"
-    local tmp_root
-    local repo_dir
-    local package_dir
-    local package_name
-    local package_count=0
-    local clone_args=(clone --depth 1 --filter=blob:none)
-
-    tmp_root=$(mktemp -d)
-    repo_dir="$tmp_root/repo"
-
-    if [ -n "$repo_branch" ]; then
-        clone_args+=(-b "$repo_branch")
-    fi
-
-    clone_args+=("$repo_url" "$repo_dir")
-
-    echo "正在从 $repo_label 同步全部顶层软件包..."
-    if ! git_retry "${clone_args[@]}"; then
-        echo "错误：从 $repo_url 克隆 $repo_label 失败" >&2
-        rm -rf "$tmp_root"
-        return 1
-    fi
-
-    for package_dir in "$repo_dir"/*; do
-        if [ ! -d "$package_dir" ] || [ ! -f "$package_dir/Makefile" ]; then
-            continue
-        fi
-
-        package_name=$(basename "$package_dir")
-        rm -rf "$target_dir/$package_name"
-        if ! mv "$package_dir" "$target_dir/"; then
-            echo "错误：无法同步 $repo_label/$package_name" >&2
-            rm -rf "$tmp_root"
-            return 1
-        fi
-        package_count=$((package_count + 1))
-    done
-
-    if ! rm -rf "$tmp_root" 2>/dev/null; then
-        sleep 1
-        rm -rf "$tmp_root" || return 1
-    fi
-
-    if [ "$package_count" -eq 0 ]; then
-        echo "错误：$repo_label 未发现顶层 OpenWrt 软件包目录" >&2
-        return 1
-    fi
-
-    echo "$repo_label 已同步 $package_count 个软件包目录。"
-}
-
-
 sync_repo_root_package_to_feed_dir() {
     local repo_url="$1"
     local repo_branch="$2"
@@ -179,6 +122,29 @@ sync_repo_root_package_to_feed_dir() {
         rm -rf "$tmp_dir"
         return 1
     fi
+}
+
+
+remove_nested_airoha_npu_package() {
+    local package_dir="$1"
+    local nested_package_dir="$package_dir/luci-app-airoha-npu"
+
+    if [ -f "$package_dir/Makefile" ] && [ -f "$nested_package_dir/Makefile" ]; then
+        rm -rf "$nested_package_dir" || return 1
+        echo "已移除 luci-app-airoha-npu 的重复嵌套包目录：$nested_package_dir"
+    fi
+}
+
+
+fix_airoha_npu_luci_mk() {
+    local package_dir="$1"
+    local makefile_path
+
+    while IFS= read -r -d '' makefile_path; do
+        if grep -qE '^[[:space:]]*include[[:space:]]+\.\./\.\./luci\.mk[[:space:]]*$' "$makefile_path"; then
+            sed -i 's|^[[:space:]]*include[[:space:]]\+\.\./\.\./luci\.mk[[:space:]]*$|include $(TOPDIR)/feeds/luci/luci.mk|' "$makefile_path" || return 1
+        fi
+    done < <(find "$package_dir" -type f -name Makefile -print0)
 }
 
 
@@ -477,12 +443,49 @@ PY
 }
 
 
+has_honk_immutable_release_metadata() {
+    python3 - "$1/Makefile" <<'PY'
+import pathlib
+import re
+import sys
+
+makefile = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+
+# Immutable source releases carry the exact tag and SHA256 values in the
+# package Makefile. Older staged snapshots still need generated-stage.mk.
+if re.search(r"^HONK_SOURCE_TAG\?=source-[A-Za-z0-9_.-]+$", makefile, re.MULTILINE) is None:
+    raise SystemExit(1)
+if re.search(
+    r"^HONK_SOURCE_URL\?=https://github\.com/kenzok8/openwrt-honk/releases/download/\$\(HONK_SOURCE_TAG\)$",
+    makefile,
+    re.MULTILINE,
+) is None:
+    raise SystemExit(1)
+
+for arch, suffix in (("X86_64", "x86_64"), ("AARCH64", "aarch64"), ("ARMV7", "armv7")):
+    if re.search(
+        rf"^HONK_ASSET_{arch}\?=honk-core-\$\(CORE_COMMIT\)-{suffix}\.tar\.gz$",
+        makefile,
+        re.MULTILINE,
+    ) is None:
+        raise SystemExit(1)
+    if re.search(rf"^HONK_HASH_{arch}\?=[0-9a-f]{{64}}$", makefile, re.MULTILINE) is None:
+        raise SystemExit(1)
+PY
+}
+
+
 prepare_honk_release() {
     local package_dir="$1"
     local release_url="https://github.com/kenzok8/openwrt-honk/releases/download/staging"
     local tmp_dir
     local filename
     local validation_status
+
+    if has_honk_immutable_release_metadata "$package_dir"; then
+        echo "Honk package uses immutable source release metadata; skipping legacy staging metadata."
+        return 0
+    fi
 
     tmp_dir=$(mktemp -d)
     # These generated build inputs are published as release assets, not in Git.
@@ -555,7 +558,7 @@ install_custom_feed() {
 
     local base_custom_feed_packages=(
         xray-core xray-plugin dns2tcp dns2socks haproxy hysteria \
-        naiveproxy shadowsocks-rust sing-box v2ray-core v2ray-geodata geoview v2ray-plugin geo2txt \
+        naiveproxy shadowsocks-rust sing-box v2ray-core v2ray-geodata geoview v2ray-plugin \
         tuic-client chinadns-ng ipt2socks tcping trojan-plus simple-obfs shadowsocksr-libev \
         v2dat adguardhome luci-app-adguardhome ddns-go \
         luci-app-ddns-go quickstart \
@@ -570,9 +573,10 @@ install_custom_feed() {
         luci-app-quickstart luci-app-homeproxy luci-app-mosdns geo2txt
         luci-app-passwall nikki luci-app-nikki mihomo-meta
         open-app-filter luci-app-oaf lucky luci-app-lucky luci-app-easytier
-        luci-app-emmc-health luci-app-wolultra luci-app-mini-diskmanager
+        luci-app-upnp miniupnpd
+        luci-app-emmc-health luci-app-airoha-npu luci-app-wolultra luci-app-mini-diskmanager
         axonhub luci-app-axonhub gecoosac luci-app-gecoosac sing-box
-        luci-app-tingreader luci-app-velo5x0-fan
+        luci-app-tingreader luci-app-velo5x0-fan luci-app-ztc1control
     )
     local custom_feed_sources=()
     local missing_feed_dirs=()
@@ -604,9 +608,10 @@ install_custom_feed() {
         "kenzok8/small-package|https://github.com/kenzok8/small-package.git||${base_custom_feed_packages[*]}"
         "linkease/istore|https://github.com/linkease/istore.git|main|luci/taskd luci/luci-lib-xterm luci/luci-lib-taskd luci/luci-app-store"
         "4IceG/luci-app-mini-diskmanager|https://github.com/4IceG/luci-app-mini-diskmanager.git|main|luci-app-mini-diskmanager"
-        "sbwml/luci-app-mosdns|https://github.com/sbwml/luci-app-mosdns.git|v5|mosdns luci-app-mosdns"
+        "sbwml/luci-app-mosdns|https://github.com/sbwml/luci-app-mosdns.git|v5|mosdns luci-app-mosdns geo2txt"
         "Openwrt-Passwall/openwrt-passwall|https://github.com/Openwrt-Passwall/openwrt-passwall.git|main|luci-app-passwall"
         "nikkinikki-org/OpenWrt-nikki|https://github.com/nikkinikki-org/OpenWrt-nikki.git|main|nikki luci-app-nikki mihomo-meta"
+        "dqsq2e2/luci-app-zTC1Control|https://github.com/dqsq2e2/luci-app-zTC1Control.git|main|luci-app-ztc1control"
     )
 
     if [[ ${DAED_PACKAGES_ENABLED:-0} == "1" ]]; then
@@ -636,10 +641,12 @@ install_custom_feed() {
     fi
     mkdir -p "$custom_feed_dir"
 
-    # 先导入 VIKINGYFY 整仓；下面的精选来源会覆盖同名包，避免改变现有稳定依赖链。
-    if ! sync_all_top_level_packages_to_feed_dir \
+    # 只同步配置仍在使用的 VIKINGYFY 包；UPnP 前端和 miniupnpd 后端保持版本配套。
+    if ! sync_sparse_packages_to_feed_dir \
         "https://github.com/VIKINGYFY/packages.git" "main" \
-        "$custom_feed_dir" "VIKINGYFY/packages"; then
+        "$custom_feed_dir" "VIKINGYFY/packages (selected)" \
+        axonhub luci-app-axonhub gecoosac luci-app-gecoosac \
+        luci-app-wolultra luci-app-upnp miniupnpd; then
         rm -rf "$custom_feed_dir"
         return 1
     fi
@@ -719,6 +726,19 @@ install_custom_feed() {
     fi
 
     if ! fix_emmc_health_luci_js_deps "$custom_feed_dir/luci-app-emmc-health"; then
+        rm -rf "$custom_feed_dir"
+        return 1
+    fi
+
+    if ! sync_repo_root_package_to_feed_dir \
+        "https://github.com/rchen14b/luci-app-airoha-npu.git" "main" \
+        "$custom_feed_dir" "rchen14b/luci-app-airoha-npu" "luci-app-airoha-npu"; then
+        rm -rf "$custom_feed_dir"
+        return 1
+    fi
+
+    if ! remove_nested_airoha_npu_package "$custom_feed_dir/luci-app-airoha-npu" || \
+       ! fix_airoha_npu_luci_mk "$custom_feed_dir/luci-app-airoha-npu"; then
         rm -rf "$custom_feed_dir"
         return 1
     fi
